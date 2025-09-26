@@ -17,16 +17,20 @@ type Querier interface {
 	CreatePolicy(ctx context.Context, arg CreatePolicyParams) (Policy, error)
 	CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error)
 	DeleteDevice(ctx context.Context, deviceID string) error
+	DeleteDeviceState(ctx context.Context, deviceID pgtype.UUID) error
 	DeleteOldEvents(ctx context.Context, eventTimestamp pgtype.Timestamptz) error
 	DeletePolicy(ctx context.Context, policyID string) error
 	DeleteTenant(ctx context.Context, id pgtype.UUID) error
 	GetDeviceByID(ctx context.Context, deviceID string) (Device, error)
 	GetDeviceByUUID(ctx context.Context, id pgtype.UUID) (Device, error)
+	GetDeviceState(ctx context.Context, deviceID pgtype.UUID) (DeviceState, error)
 	GetEventByID(ctx context.Context, eventID string) (Event, error)
 	GetLatestPolicyByTenant(ctx context.Context, tenantID pgtype.UUID) (Policy, error)
 	GetPolicyByID(ctx context.Context, policyID string) (Policy, error)
+	GetStaleDeviceStates(ctx context.Context, arg GetStaleDeviceStatesParams) ([]DeviceState, error)
 	GetTenantByCode(ctx context.Context, tenantCode string) (Tenant, error)
 	GetTenantByID(ctx context.Context, id pgtype.UUID) (Tenant, error)
+	ListDeviceStatesByTenant(ctx context.Context, arg ListDeviceStatesByTenantParams) ([]DeviceState, error)
 	ListDevicesByStatus(ctx context.Context, arg ListDevicesByStatusParams) ([]Device, error)
 	ListDevicesByTenant(ctx context.Context, arg ListDevicesByTenantParams) ([]Device, error)
 	ListEventsByDevice(ctx context.Context, arg ListEventsByDeviceParams) ([]Event, error)
@@ -38,6 +42,7 @@ type Querier interface {
 	UpdateDeviceStatus(ctx context.Context, arg UpdateDeviceStatusParams) (Device, error)
 	UpdatePolicy(ctx context.Context, arg UpdatePolicyParams) (Policy, error)
 	UpdateTenant(ctx context.Context, arg UpdateTenantParams) (Tenant, error)
+	UpsertDeviceState(ctx context.Context, arg UpsertDeviceStateParams) (DeviceState, error)
 }
 
 var _ Querier = (*Queries)(nil)

@@ -69,9 +69,11 @@ func (s *DeviceService) ReportState(ctx context.Context, req *pb.ReportStateRequ
 		return nil, status.Errorf(codes.Unauthenticated, "device authentication failed: %v", err)
 	}
 
-	// Step 2: Store device state
-	if err := s.storeDeviceState(ctx, req); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to store device state: %v", err)
+	// Step 2: Process device state with comprehensive analysis
+	processor := NewStateProcessor(s.db)
+	analysis, err := processor.ProcessDeviceState(ctx, req.DeviceId, req.State)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to process device state: %v", err)
 	}
 
 	// Step 3: Update device last seen
@@ -80,12 +82,35 @@ func (s *DeviceService) ReportState(ctx context.Context, req *pb.ReportStateRequ
 		fmt.Printf("Failed to update device last seen: %v\n", err)
 	}
 
-	// Step 4: Prepare response
+	// Step 4: Determine if policy pull is required
+	shouldPullPolicy, policyReason, err := processor.DeterminePolicyPullRequired(ctx, req.DeviceId, req.State)
+	if err != nil {
+		// Log error but don't fail the request
+		fmt.Printf("Failed to determine policy pull requirement: %v\n", err)
+		shouldPullPolicy = false
+	}
+
+	// Step 5: Calculate next report interval based on device state
+	nextInterval := processor.CalculateNextReportInterval(analysis)
+
+	// Step 6: Prepare response
 	response := &pb.ReportStateResponse{
-		ServerTime:                  timestamppb.Now(),
-		CorrelationId:               generateCorrelationID(),
-		ShouldPullPolicy:            false, // TODO: Determine if policy pull is needed
-		NextReportIntervalSeconds:   300,   // 5 minutes
+		ServerTime:                timestamppb.Now(),
+		CorrelationId:             generateCorrelationID(),
+		ShouldPullPolicy:          shouldPullPolicy,
+		NextReportIntervalSeconds: nextInterval,
+	}
+
+	// Log policy pull reason if applicable
+	if shouldPullPolicy && policyReason != "" {
+		fmt.Printf("Device %s requires policy pull: %s\n", req.DeviceId, policyReason)
+	}
+
+	// Log critical alerts
+	for _, alert := range analysis.Alerts {
+		if containsString(alert, "Critical:") {
+			fmt.Printf("CRITICAL ALERT for device %s: %s\n", req.DeviceId, alert)
+		}
 	}
 
 	return response, nil
