@@ -1,0 +1,4 @@
+version: v1
+name: buf.build/evergreenos/selfhost-backend
+deps:
+  - buf.build/googleapis/googleapis

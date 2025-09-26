@@ -1,0 +1,33 @@
+# EvergreenOS Selfhost Backend Configuration
+server:
+  grpc_port: 9090
+  rest_port: 8080
+  tls_cert_file: ""
+  tls_key_file: ""
+
+database:
+  host: localhost
+  port: 5432
+  name: evergreen_selfhost
+  user: evergreen
+  password: ""
+  ssl_mode: require
+  max_connections: 25
+
+auth:
+  jwt_secret: ""
+  jwt_expiry_hours: 1
+  device_token_expiry_hours: 8760  # 1 year
+
+policy:
+  signing_key_path: ""
+  signing_key_id: "default"
+
+logging:
+  level: info
+  format: json
+
+metrics:
+  enabled: true
+  port: 9091
+  path: /metrics
