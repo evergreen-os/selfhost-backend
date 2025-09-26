@@ -8,6 +8,7 @@ import (
 
 	"github.com/evergreenos/selfhost-backend/internal/db"
 	generated "github.com/evergreenos/selfhost-backend/internal/db/generated"
+	"github.com/evergreenos/selfhost-backend/internal/policies"
 	pb "github.com/evergreenos/selfhost-backend/gen/go/evergreen/v1"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -19,14 +20,21 @@ import (
 // DeviceService implements the gRPC DeviceService
 type DeviceService struct {
 	pb.UnimplementedDeviceServiceServer
-	db *db.DB
+	db            *db.DB
+	policyService *policies.PolicyService
 }
 
 // NewDeviceService creates a new device service
-func NewDeviceService(database *db.DB) *DeviceService {
-	return &DeviceService{
-		db: database,
+func NewDeviceService(database *db.DB) (*DeviceService, error) {
+	policyService, err := policies.NewPolicyService(database)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create policy service: %w", err)
 	}
+
+	return &DeviceService{
+		db:            database,
+		policyService: policyService,
+	}, nil
 }
 
 // EnrollDevice handles device enrollment requests
@@ -198,18 +206,11 @@ func (s *DeviceService) createDevice(ctx context.Context, deviceID string, tenan
 
 // getInitialPolicy retrieves the initial policy for a tenant
 func (s *DeviceService) getInitialPolicy(ctx context.Context, tenantID pgtype.UUID) (*pb.PolicyBundle, error) {
-	policy, err := s.db.Queries().GetLatestPolicyByTenant(ctx, tenantID)
+	// Try to get the latest signed policy from the policy service
+	policyBundle, err := s.policyService.GetLatestPolicyByTenant(ctx, tenantID)
 	if err != nil {
-		// Return a default policy if none exists
-		return s.getDefaultPolicy(), nil
-	}
-
-	// Convert database policy to protobuf
-	policyBundle := &pb.PolicyBundle{
-		Id:      policy.PolicyID,
-		Name:    policy.Name,
-		Version: timestamppb.New(policy.VersionTimestamp.Time),
-		// TODO: Parse policy_bundle JSON and populate other fields
+		// Return a default signed policy if none exists
+		return s.policyService.GetDefaultPolicy(), nil
 	}
 
 	return policyBundle, nil

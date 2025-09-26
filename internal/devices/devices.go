@@ -3,9 +3,11 @@ package devices
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/evergreenos/selfhost-backend/internal/db"
+	generated "github.com/evergreenos/selfhost-backend/internal/db/generated"
 	pb "github.com/evergreenos/selfhost-backend/gen/go/evergreen/v1"
+	"github.com/jackc/pgx/v5/pgtype"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -124,7 +126,7 @@ func (s *DeviceService) validateStateRequest(req *pb.ReportStateRequest) error {
 }
 
 // validateDeviceToken validates device authentication
-func (s *DeviceService) validateDeviceToken(ctx context.Context, deviceID, token string) (*db.Device, error) {
+func (s *DeviceService) validateDeviceToken(ctx context.Context, deviceID, token string) (*generated.Device, error) {
 	// In production, this should validate the JWT token
 	// For now, we'll do basic device lookup
 	device, err := s.db.Queries().GetDeviceByID(ctx, deviceID)
@@ -153,9 +155,14 @@ func (s *DeviceService) isPolicyUpdateNeeded(currentVersion, latestVersion *time
 
 // getLatestPolicyForDevice gets the latest policy for a device's tenant
 func (s *DeviceService) getLatestPolicyForDevice(ctx context.Context, tenantID pgtype.UUID) (*pb.PolicyBundle, error) {
-	// This should get the latest policy from database and convert to protobuf
-	// For now, return a default policy
-	return s.getDefaultPolicy(), nil
+	// Try to get the latest signed policy from the policy service
+	policyBundle, err := s.policyService.GetLatestPolicyByTenant(ctx, tenantID)
+	if err != nil {
+		// Return a default signed policy if none exists
+		return s.policyService.GetDefaultPolicy(), nil
+	}
+
+	return policyBundle, nil
 }
 
 // updateDeviceLastSeen updates the device's last seen timestamp
