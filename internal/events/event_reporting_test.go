@@ -323,10 +323,10 @@ func TestEventReporting(t *testing.T) {
 					Source:    "app.firefox",
 					Message:   "Application crashed unexpectedly",
 					Details: map[string]string{
-						"exit_code":    "1",
-						"signal":       "SIGSEGV",
-						"stack_trace":  "0x7fff...",
-						"app_version":  "115.0",
+						"exit_code":   "1",
+						"signal":      "SIGSEGV",
+						"stack_trace": "0x7fff...",
+						"app_version": "115.0",
 					},
 				},
 				RequestTime: timestamppb.Now(),
@@ -381,6 +381,7 @@ func TestEventReporting(t *testing.T) {
 					Message:   "Test event",
 				},
 			}
+			_ = req
 
 			// Mock authentication failure
 			authFailed := true
@@ -452,6 +453,7 @@ func TestEventReporting(t *testing.T) {
 					},
 				},
 			}
+			_ = req
 
 			// Mock storage failure
 			storageFailed := true // Simulate database error
@@ -526,10 +528,10 @@ func TestEventReporting(t *testing.T) {
 					Source:    "audit.log",
 					Message:   "Unauthorized file access attempt",
 					Details: map[string]string{
-						"file":         "/etc/shadow",
-						"user":         "guest",
-						"access_type":  "read",
-						"denied":       "true",
+						"file":        "/etc/shadow",
+						"user":        "guest",
+						"access_type": "read",
+						"denied":      "true",
 					},
 				},
 			},
@@ -545,9 +547,9 @@ func TestEventReporting(t *testing.T) {
 					Source:    "policy-engine",
 					Message:   "Policy violation detected",
 					Details: map[string]string{
-						"policy_id":     "pol-123",
-						"violation":     "unauthorized_app_install",
-						"app_flatpak":   "com.example.unauthorized",
+						"policy_id":   "pol-123",
+						"violation":   "unauthorized_app_install",
+						"app_flatpak": "com.example.unauthorized",
 					},
 				},
 			},
@@ -651,7 +653,11 @@ func TestEventReporting(t *testing.T) {
 					t.Errorf("Nonce %d should be unique", i)
 				}
 
-				t.Logf("Nonce %d validation passed: %s", i+1, nonce[:20]+"...")
+				display := nonce
+				if len(display) > 20 {
+					display = display[:20]
+				}
+				t.Logf("Nonce %d validation passed: %s...", i+1, display)
 			}
 		})
 
@@ -671,7 +677,7 @@ func TestEventReporting(t *testing.T) {
 
 			for _, token := range validTokens {
 				// Mock token validation logic
-				isValid := len(token) > 10 // Simplified validation
+				isValid := len(token) > 20 // Simplified validation
 				if !isValid {
 					t.Errorf("Valid token should pass validation: %s", token)
 				}
@@ -680,7 +686,7 @@ func TestEventReporting(t *testing.T) {
 
 			for _, token := range invalidTokens {
 				// Mock token validation logic
-				isValid := len(token) > 10 // Simplified validation
+				isValid := len(token) > 20 // Simplified validation
 				if isValid && token != "malformed.jwt.token" {
 					t.Errorf("Invalid token should fail validation: %s", token)
 				}

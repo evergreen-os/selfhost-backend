@@ -6,21 +6,30 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/evergreenos/selfhost-backend/internal/db"
-	generated "github.com/evergreenos/selfhost-backend/internal/db/generated"
 	pb "github.com/evergreenos/selfhost-backend/gen/go/evergreen/v1"
+	generated "github.com/evergreenos/selfhost-backend/internal/db/generated"
 	"github.com/jackc/pgx/v5/pgtype"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// StateProcessorInterface describes the behaviour required by DeviceService for state handling.
+type StateProcessorInterface interface {
+	ProcessDeviceState(ctx context.Context, deviceID string, state *pb.DeviceState) (*StateAnalysis, error)
+	DeterminePolicyPullRequired(ctx context.Context, deviceID string, state *pb.DeviceState) (bool, string, error)
+	CalculateNextReportInterval(analysis *StateAnalysis) int32
+}
 
 // StateProcessor handles device state processing and analysis
 type StateProcessor struct {
-	db *db.DB
+	store  DeviceStore
+	events eventsRecorder
 }
 
 // NewStateProcessor creates a new state processor
-func NewStateProcessor(database *db.DB) *StateProcessor {
+func NewStateProcessor(store DeviceStore, events eventsRecorder) *StateProcessor {
 	return &StateProcessor{
-		db: database,
+		store:  store,
+		events: events,
 	}
 }
 
@@ -31,9 +40,9 @@ func (sp *StateProcessor) ProcessDeviceState(ctx context.Context, deviceID strin
 	}
 
 	analysis := &StateAnalysis{
-		DeviceID:    deviceID,
-		ProcessedAt: time.Now(),
-		Alerts:      []string{},
+		DeviceID:        deviceID,
+		ProcessedAt:     time.Now(),
+		Alerts:          []string{},
 		Recommendations: []string{},
 	}
 
@@ -74,12 +83,12 @@ func (sp *StateProcessor) ProcessDeviceState(ctx context.Context, deviceID strin
 
 // StateAnalysis contains the results of device state processing
 type StateAnalysis struct {
-	DeviceID          string
-	ProcessedAt       time.Time
-	ValidationErrors  []string
-	Alerts            []string
-	Recommendations   []string
-	PolicyViolations  []string
+	DeviceID           string
+	ProcessedAt        time.Time
+	ValidationErrors   []string
+	Alerts             []string
+	Recommendations    []string
+	PolicyViolations   []string
 	RequiresPolicyPull bool
 	NextReportInterval time.Duration
 }
@@ -302,15 +311,15 @@ func (sp *StateProcessor) storeDeviceState(ctx context.Context, deviceID string,
 	}
 
 	// Store in device_states table
-	_, err = sp.db.Queries().UpsertDeviceState(ctx, generated.UpsertDeviceStateParams{
+	_, err = sp.store.UpsertDeviceState(ctx, generated.UpsertDeviceStateParams{
 		DeviceID:        deviceUUID,
 		ActivePolicyID:  &state.ActivePolicyId,
-		PolicyAppliedAt: pgtype.Timestamptz{Time: state.PolicyAppliedAt.AsTime(), Valid: state.PolicyAppliedAt != nil},
-		InstalledApps:   stateJSON, // Store full state as JSON for now
+		PolicyAppliedAt: timestampToPG(state.PolicyAppliedAt),
+		InstalledApps:   stateJSON,    // Store full state as JSON for now
 		UpdateStatus:    analysisJSON, // Store analysis as JSON for now
-		HealthMetrics:   stateJSON, // Store full state as JSON for now
-		LastError:       nil, // Will be populated if there are errors
-		ReportedAt:      pgtype.Timestamptz{Time: state.ReportedAt.AsTime(), Valid: state.ReportedAt != nil},
+		HealthMetrics:   stateJSON,    // Store full state as JSON for now
+		LastError:       nil,          // Will be populated if there are errors
+		ReportedAt:      timestampToPG(state.ReportedAt),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to store device state: %w", err)
@@ -331,40 +340,38 @@ func (sp *StateProcessor) storeDeviceState(ctx context.Context, deviceID string,
 
 // createAlertEvent creates an event for critical alerts
 func (sp *StateProcessor) createAlertEvent(ctx context.Context, deviceID, alertMessage string) error {
-	eventID := fmt.Sprintf("alert-%d", time.Now().UnixNano())
-
-	// Convert device ID string to UUID
-	var deviceUUID pgtype.UUID
-	if err := deviceUUID.Scan(deviceID); err != nil {
-		return fmt.Errorf("failed to convert device ID to UUID: %w", err)
+	if sp.events == nil {
+		return nil
 	}
 
-	_, err := sp.db.Queries().CreateEvent(ctx, generated.CreateEventParams{
-		EventID:      eventID,
-		DeviceID:     deviceUUID,
-		EventType:    "system_alert",
-		EventLevel:   "error",
-		Message:      alertMessage,
-		Metadata:     []byte("{}"),
-		UserID:       nil,
-		AppID:        nil,
-		PolicyID:     nil,
-		ErrorDetails: nil,
-	})
+	device, err := sp.store.GetDeviceByID(ctx, deviceID)
+	if err != nil {
+		return fmt.Errorf("fetch device for alert: %w", err)
+	}
 
+	event := &pb.DeviceEvent{
+		EventId:   fmt.Sprintf("alert-%d", time.Now().UnixNano()),
+		DeviceId:  deviceID,
+		Type:      pb.EventType_EVENT_TYPE_SYSTEM,
+		Level:     pb.EventLevel_EVENT_LEVEL_ERROR,
+		Timestamp: timestamppb.Now(),
+		Message:   alertMessage,
+	}
+
+	_, err = sp.events.IngestBatch(ctx, device, []*pb.DeviceEvent{event})
 	return err
 }
 
 // DeterminePolicyPullRequired checks if the device should pull a new policy
 func (sp *StateProcessor) DeterminePolicyPullRequired(ctx context.Context, deviceID string, state *pb.DeviceState) (bool, string, error) {
 	// Get device from database to check tenant
-	device, err := sp.db.Queries().GetDeviceByID(ctx, deviceID)
+	device, err := sp.store.GetDeviceByID(ctx, deviceID)
 	if err != nil {
 		return false, "", fmt.Errorf("failed to get device: %w", err)
 	}
 
 	// Get latest policy for tenant
-	latestPolicy, err := sp.db.Queries().GetLatestPolicyByTenant(ctx, device.TenantID)
+	latestPolicy, err := sp.store.GetLatestPolicyByTenant(ctx, device.TenantID)
 	if err != nil {
 		// No policy found - device should continue with current state
 		return false, "", nil
@@ -417,10 +424,17 @@ func (sp *StateProcessor) CalculateNextReportInterval(analysis *StateAnalysis) i
 	return baseInterval
 }
 
+func timestampToPG(ts *timestamppb.Timestamp) pgtype.Timestamptz {
+	if ts == nil {
+		return pgtype.Timestamptz{Valid: false}
+	}
+	return pgtype.Timestamptz{Time: ts.AsTime(), Valid: true}
+}
+
 // Helper function to check if a string contains a substring
 func containsString(haystack, needle string) bool {
 	return len(needle) > 0 && len(haystack) >= len(needle) &&
-		   findString(haystack, needle) >= 0
+		findString(haystack, needle) >= 0
 }
 
 // Helper function to find a substring

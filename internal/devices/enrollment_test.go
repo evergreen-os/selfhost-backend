@@ -2,338 +2,194 @@ package devices
 
 import (
 	"context"
+	"errors"
 	"testing"
-	"time"
 
 	pb "github.com/evergreenos/selfhost-backend/gen/go/evergreen/v1"
+	generated "github.com/evergreenos/selfhost-backend/internal/db/generated"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+	"golang.org/x/crypto/bcrypt"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestDeviceEnrollment(t *testing.T) {
-	t.Run("EnrollDeviceRequest_Validation", func(t *testing.T) {
-		// Test valid enrollment request
-		t.Run("ValidRequest", func(t *testing.T) {
-			req := &pb.EnrollDeviceRequest{
-				EnrollmentToken: "valid-tenant-token",
-				Hardware: &pb.HardwareInfo{
-					Model:             "ThinkPad X1",
-					Manufacturer:      "Lenovo",
-					SerialNumber:      "SN123456789",
-					Architecture:      pb.Architecture_ARCHITECTURE_AMD64,
-					TotalMemoryBytes:  16 * 1024 * 1024 * 1024,  // 16GB
-					TotalStorageBytes: 512 * 1024 * 1024 * 1024, // 512GB
-					TpmEnabled:        true,
-					TpmVersion:        "2.0",
-				},
-				OsInfo: &pb.OSInfo{
-					Name:          "EvergreenOS",
-					Version:       "1.0.0",
-					KernelVersion: "6.1.0-evergreen",
-					BuildId:       "build-123",
-				},
-				Network: &pb.NetworkInfo{
-					PrimaryMacAddress: "00:11:22:33:44:55",
-					Hostname:          "student-laptop-001",
-					Interfaces: []*pb.NetworkInterface{
-						{
-							Name:       "eth0",
-							MacAddress: "00:11:22:33:44:55",
-							Active:     true,
-							Type:       "ethernet",
-						},
-					},
-				},
-				AgentVersion: &pb.Version{
-					Version:   "1.0.0",
-					Commit:    "abc123def456",
-					BuildTime: timestamppb.New(time.Now()),
-				},
-				EnrollmentSecret: "shared-secret-123",
-				Nonce:            "random-nonce-456",
+func validEnrollmentRequest() *pb.EnrollDeviceRequest {
+	return &pb.EnrollDeviceRequest{
+		EnrollmentToken:  "tenant-code",
+		EnrollmentSecret: "secret",
+		Hardware: &pb.HardwareInfo{
+			Model:             "Evergreen Model",
+			Manufacturer:      "Evergreen",
+			SerialNumber:      "SN123",
+			Architecture:      pb.Architecture_ARCHITECTURE_X86_64,
+			TotalMemoryBytes:  8 * 1024 * 1024 * 1024,
+			TotalStorageBytes: 128 * 1024 * 1024 * 1024,
+		},
+		OsInfo: &pb.OSInfo{
+			Name:          "EvergreenOS",
+			Version:       "1.0",
+			KernelVersion: "6.0",
+			BuildId:       "build-123",
+		},
+		Network: &pb.NetworkInfo{
+			Hostname:          "device.local",
+			PrimaryMacAddress: "00:11:22:33:44:55",
+		},
+		AgentVersion: &pb.Version{Version: "1.2.3", Commit: "abc123", BuildTime: timestamppb.Now()},
+		Nonce:        "nonce-value",
+	}
+}
+
+func TestEnrollDeviceSuccess(t *testing.T) {
+	t.Parallel()
+
+	tenantUUID := pgtype.UUID{}
+	_ = tenantUUID.Scan(uuid.New().String())
+
+	tokenManager := newDeviceTokenManager(t)
+	hashedSecret, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash secret: %v", err)
+	}
+	policy := &pb.PolicyBundle{Id: "policy-1", Name: "Default", Version: timestamppb.Now()}
+
+	var capturedHash string
+	store := &fakeDeviceStore{
+		getTenantByCodeFn: func(ctx context.Context, tenantCode string) (generated.Tenant, error) {
+			if tenantCode != "tenant-code" {
+				return generated.Tenant{}, errors.New("unexpected tenant code")
 			}
-
-			// Validate required fields
-			if req.EnrollmentToken == "" {
-				t.Error("Enrollment token is required")
+			return generated.Tenant{ID: tenantUUID, TenantCode: tenantCode, EnrollmentSecretHash: string(hashedSecret)}, nil
+		},
+		createDeviceFn: func(ctx context.Context, arg generated.CreateDeviceParams) (generated.Device, error) {
+			capturedHash = arg.DeviceTokenHash
+			if arg.Status != "enrolled" {
+				t.Fatalf("expected status enrolled, got %s", arg.Status)
 			}
+			return generated.Device{DeviceID: arg.DeviceID}, nil
+		},
+	}
 
-			if req.Hardware == nil {
-				t.Error("Hardware info is required")
-			}
+	policySvc := &fakePolicyService{
+		latestPolicyFn: func(ctx context.Context, tenantID pgtype.UUID) (*pb.PolicyBundle, error) {
+			return policy, nil
+		},
+	}
 
-			if req.OsInfo == nil {
-				t.Error("OS info is required")
-			}
+	service := NewDeviceServiceWithDependencies(store, policySvc, tokenManager, &fakeEventsRecorder{}, nil)
 
-			if req.Network == nil {
-				t.Error("Network info is required")
-			}
+	req := validEnrollmentRequest()
+	resp, err := service.EnrollDevice(context.Background(), req)
+	if err != nil {
+		t.Fatalf("EnrollDevice returned error: %v", err)
+	}
 
-			if req.AgentVersion == nil {
-				t.Error("Agent version is required")
-			}
+	if resp.DeviceId == "" {
+		t.Fatal("expected device id to be set")
+	}
+	if resp.DeviceToken == "" {
+		t.Fatal("expected device token to be returned")
+	}
+	if resp.PolicyBundle == nil || resp.PolicyBundle.Id != policy.Id {
+		t.Fatalf("expected policy bundle %s", policy.Id)
+	}
+	if capturedHash == "" {
+		t.Fatal("expected hashed token to be stored")
+	}
 
-			if req.Nonce == "" {
-				t.Error("Nonce is required for replay protection")
-			}
-		})
+	tenantUUIDParsed, _ := uuid.FromBytes(tenantUUID.Bytes[:])
+	if _, err := tokenManager.VerifyDeviceToken(resp.DeviceToken, resp.DeviceId, tenantUUIDParsed.String(), capturedHash); err != nil {
+		t.Fatalf("device token verification failed: %v", err)
+	}
+}
 
-		t.Run("InvalidRequest_MissingFields", func(t *testing.T) {
-			// Test missing enrollment token
-			req := &pb.EnrollDeviceRequest{}
+func TestEnrollDeviceValidatesRequest(t *testing.T) {
+	t.Parallel()
 
-			if req.EnrollmentToken != "" {
-				t.Error("Expected empty enrollment token")
-			}
+	service := NewDeviceServiceWithDependencies(&fakeDeviceStore{}, &fakePolicyService{}, newDeviceTokenManager(t), &fakeEventsRecorder{}, nil)
 
-			if req.Hardware != nil {
-				t.Error("Expected nil hardware info")
-			}
-		})
+	_, err := service.EnrollDevice(context.Background(), &pb.EnrollDeviceRequest{})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected invalid argument, got %v", err)
+	}
+}
 
-		t.Run("InvalidRequest_MalformedData", func(t *testing.T) {
-			// Test malformed hardware info
-			req := &pb.EnrollDeviceRequest{
-				EnrollmentToken: "valid-token",
-				Hardware: &pb.HardwareInfo{
-					Model:        "", // Empty model should be invalid
-					Manufacturer: "Test Corp",
-					SerialNumber: "SN123",
-					Architecture: pb.Architecture_ARCHITECTURE_UNSPECIFIED,
-				},
-			}
+func TestEnrollDeviceRejectsUnknownTenant(t *testing.T) {
+	t.Parallel()
 
-			if req.Hardware.Model != "" {
-				t.Error("Expected empty model for validation test")
-			}
+	store := &fakeDeviceStore{
+		getTenantByCodeFn: func(ctx context.Context, tenantCode string) (generated.Tenant, error) {
+			return generated.Tenant{}, errors.New("not found")
+		},
+	}
 
-			if req.Hardware.Architecture != pb.Architecture_ARCHITECTURE_UNSPECIFIED {
-				t.Error("Expected unspecified architecture for validation test")
-			}
-		})
-	})
+	service := NewDeviceServiceWithDependencies(store, &fakePolicyService{}, newDeviceTokenManager(t), &fakeEventsRecorder{}, nil)
 
-	t.Run("EnrollDeviceResponse_Structure", func(t *testing.T) {
-		// Test enrollment response structure
-		t.Run("SuccessfulResponse", func(t *testing.T) {
-			resp := &pb.EnrollDeviceResponse{
-				DeviceId:    "device-uuid-123",
-				DeviceToken: "jwt-device-token",
-				PolicyBundle: &pb.PolicyBundle{
-					Id:      "policy-default-1",
-					Name:    "Default School Policy",
-					Version: timestamppb.New(time.Now()),
-					Apps: &pb.AppPolicy{
-						AutoInstallRequired:   true,
-						AutoRemoveForbidden:   true,
-						InstallTimeoutSeconds: 300,
-					},
-					Updates: &pb.UpdatePolicy{
-						Channel:     pb.UpdateChannel_UPDATE_CHANNEL_STABLE,
-						AutoInstall: true,
-						AutoReboot:  false,
-					},
-				},
-				ServerTime:             timestamppb.New(time.Now()),
-				CorrelationId:          "corr-123",
-				CheckinIntervalSeconds: 300, // 5 minutes
-				PolicyEndpoint:         "https://backend.school.edu/v1/devices/{device_id}/policy",
-				StateEndpoint:          "https://backend.school.edu/v1/devices/{device_id}/state",
-				EventsEndpoint:         "https://backend.school.edu/v1/devices/{device_id}/events",
-			}
+	_, err := service.EnrollDevice(context.Background(), validEnrollmentRequest())
+	if err == nil {
+		t.Fatal("expected tenant validation error")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated error, got %v", err)
+	}
+}
 
-			// Validate response fields
-			if resp.DeviceId == "" {
-				t.Error("Device ID is required in response")
-			}
+func TestEnrollDeviceRejectsInvalidSecret(t *testing.T) {
+	t.Parallel()
 
-			if resp.DeviceToken == "" {
-				t.Error("Device token is required in response")
-			}
+	hashedSecret, err := bcrypt.GenerateFromPassword([]byte("correct"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash secret: %v", err)
+	}
+	store := &fakeDeviceStore{
+		getTenantByCodeFn: func(ctx context.Context, tenantCode string) (generated.Tenant, error) {
+			return generated.Tenant{EnrollmentSecretHash: string(hashedSecret)}, nil
+		},
+	}
 
-			if resp.PolicyBundle == nil {
-				t.Error("Initial policy bundle is required")
-			}
+	service := NewDeviceServiceWithDependencies(store, &fakePolicyService{}, newDeviceTokenManager(t), &fakeEventsRecorder{}, nil)
+	req := validEnrollmentRequest()
+	req.EnrollmentSecret = "wrong"
+	_, err = service.EnrollDevice(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected secret validation error")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated, got %v", st.Code())
+	}
+}
 
-			if resp.ServerTime == nil {
-				t.Error("Server time is required for clock sync")
-			}
+func TestEnrollDeviceRejectsDuplicateSerial(t *testing.T) {
+	t.Parallel()
 
-			if resp.CheckinIntervalSeconds <= 0 {
-				t.Error("Check-in interval must be positive")
-			}
+	hashedSecret, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash secret: %v", err)
+	}
+	store := &fakeDeviceStore{
+		getTenantByCodeFn: func(ctx context.Context, tenantCode string) (generated.Tenant, error) {
+			return generated.Tenant{EnrollmentSecretHash: string(hashedSecret)}, nil
+		},
+		getDeviceBySerialFn: func(ctx context.Context, serial *string) (generated.Device, error) {
+			return generated.Device{DeviceID: "existing"}, nil
+		},
+	}
 
-			if resp.PolicyEndpoint == "" {
-				t.Error("Policy endpoint URL is required")
-			}
-
-			if resp.StateEndpoint == "" {
-				t.Error("State endpoint URL is required")
-			}
-
-			if resp.EventsEndpoint == "" {
-				t.Error("Events endpoint URL is required")
-			}
-		})
-
-		t.Run("ErrorResponse", func(t *testing.T) {
-			// Test error cases that should be handled
-			errorCases := []struct {
-				name   string
-				reason string
-			}{
-				{"InvalidTenantCode", "Tenant code not found"},
-				{"InvalidEnrollmentSecret", "Enrollment secret mismatch"},
-				{"DeviceAlreadyEnrolled", "Device with this serial number already enrolled"},
-				{"TenantQuotaExceeded", "Maximum devices reached for tenant"},
-				{"ReplayAttack", "Nonce already used"},
-			}
-
-			for _, tc := range errorCases {
-				t.Run(tc.name, func(t *testing.T) {
-					// In real implementation, these would return gRPC errors
-					// For now, test that we can categorize error types
-					if tc.reason == "" {
-						t.Errorf("Error reason should not be empty for %s", tc.name)
-					}
-				})
-			}
-		})
-	})
-
-	t.Run("EnrollmentWorkflow", func(t *testing.T) {
-		// Test the complete enrollment workflow
-		t.Run("HappyPath", func(t *testing.T) {
-			ctx := context.Background()
-
-			// Step 1: Validate tenant and enrollment secret
-			tenantCode := "SCHOOL123"
-			enrollmentSecret := "shared-secret"
-
-			if tenantCode == "" {
-				t.Error("Tenant code validation failed")
-			}
-
-			if enrollmentSecret == "" {
-				t.Error("Enrollment secret validation failed")
-			}
-
-			// Step 2: Generate device ID and token
-			deviceID := "generated-device-uuid"
-			deviceToken := "generated-jwt-token"
-
-			if deviceID == "" {
-				t.Error("Device ID generation failed")
-			}
-
-			if deviceToken == "" {
-				t.Error("Device token generation failed")
-			}
-
-			// Step 3: Store device in database
-			// This would call our database layer
-			stored := true // Mock success
-			if !stored {
-				t.Error("Device storage failed")
-			}
-
-			// Step 4: Get initial policy for tenant
-			policyFound := true // Mock policy exists
-			if !policyFound {
-				t.Error("Initial policy retrieval failed")
-			}
-
-			// Step 5: Return enrollment response
-			success := true // Mock overall success
-			if !success {
-				t.Error("Enrollment workflow failed")
-			}
-
-			// Test context handling
-			if ctx == nil {
-				t.Error("Context should not be nil")
-			}
-		})
-
-		t.Run("TenantValidationFailure", func(t *testing.T) {
-			// Test tenant validation failure
-			invalidTenantCode := "INVALID"
-			tenantExists := false // Mock tenant not found
-
-			if tenantExists {
-				t.Errorf("Tenant %s should not exist", invalidTenantCode)
-			}
-		})
-
-		t.Run("EnrollmentSecretFailure", func(t *testing.T) {
-			// Test enrollment secret validation failure
-			validTenantCode := "SCHOOL123"
-			invalidSecret := "wrong-secret"
-			secretMatches := false // Mock secret mismatch
-
-			if secretMatches {
-				t.Errorf("Secret should not match for tenant %s", validTenantCode)
-			}
-
-			_ = invalidSecret // Use the variable
-		})
-
-		t.Run("DeviceAlreadyExists", func(t *testing.T) {
-			// Test duplicate device enrollment
-			serialNumber := "EXISTING123"
-			deviceExists := true // Mock device already exists
-
-			if !deviceExists {
-				t.Errorf("Device with serial %s should already exist", serialNumber)
-			}
-		})
-	})
-
-	t.Run("SecurityConsiderations", func(t *testing.T) {
-		// Test security aspects of enrollment
-		t.Run("NonceValidation", func(t *testing.T) {
-			// Test nonce for replay attack protection
-			nonce1 := "nonce-123"
-			nonce2 := "nonce-123" // Same nonce (replay)
-
-			if nonce1 != nonce2 {
-				t.Error("Nonces should match for replay test")
-			}
-
-			// In real implementation, we'd check nonce cache/storage
-			nonceUsed := false // Mock nonce not yet used
-			if nonceUsed {
-				t.Error("Nonce should not be marked as used initially")
-			}
-		})
-
-		t.Run("TokenGeneration", func(t *testing.T) {
-			// Test device token generation
-			deviceID := "device-123"
-			tenantID := "tenant-456"
-
-			// Mock token generation (would use JWT in real implementation)
-			token := "jwt.token.here"
-
-			if token == "" {
-				t.Error("Token generation failed")
-			}
-
-			// Validate token contains necessary claims
-			if deviceID == "" || tenantID == "" {
-				t.Error("Device ID and Tenant ID required for token claims")
-			}
-		})
-
-		t.Run("EnrollmentSecretHandling", func(t *testing.T) {
-			// Test secure handling of enrollment secrets
-			plainSecret := "my-secret"
-
-			// In real implementation, secrets should be hashed
-			// For now, test that we handle secrets securely
-			if len(plainSecret) < 8 {
-				t.Error("Enrollment secret should be at least 8 characters")
-			}
-		})
-	})
+	service := NewDeviceServiceWithDependencies(store, &fakePolicyService{}, newDeviceTokenManager(t), &fakeEventsRecorder{}, nil)
+	_, err = service.EnrollDevice(context.Background(), validEnrollmentRequest())
+	if err == nil {
+		t.Fatal("expected duplicate device error")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.AlreadyExists {
+		t.Fatalf("expected already exists, got %v", st.Code())
+	}
 }

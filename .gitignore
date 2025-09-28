@@ -37,6 +37,11 @@ Thumbs.db
 
 # Generated code
 gen/
+!gen/go/
+!gen/go/evergreen/
+!gen/go/evergreen/v1/
+!gen/go/evergreen/v1/types.go
+!gen/go/evergreen/v1/device_service_grpc.go
 
 # Secret configuration files
 config/secrets.yaml
