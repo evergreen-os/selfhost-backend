@@ -31,3 +31,7 @@ metrics:
   enabled: true
   port: 9091
   path: /metrics
+
+attestation:
+  enabled: false
+  quote_ttl_seconds: 300

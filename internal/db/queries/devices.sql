@@ -60,3 +60,7 @@ RETURNING *;
 -- name: DeleteDevice :exec
 DELETE FROM devices
 WHERE device_id = $1;
+-- name: GetDeviceBySerialNumber :one
+SELECT * FROM devices
+WHERE hardware_serial_number = $1
+LIMIT 1;

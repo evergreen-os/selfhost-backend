@@ -1,12 +1,17 @@
 package policies
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	pb "github.com/evergreenos/selfhost-backend/gen/go/evergreen/v1"
+	"github.com/evergreenos/selfhost-backend/internal/config"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -14,7 +19,7 @@ func TestPolicyService(t *testing.T) {
 	t.Run("PolicyServiceCreation", func(t *testing.T) {
 		t.Run("NewPolicyService", func(t *testing.T) {
 			// Test that NewPolicyService creates a service with Ed25519 keys
-			service, err := NewPolicyService(nil) // Using nil DB for unit test
+			service, err := NewPolicyService(nil, config.PolicyConfig{}) // Using nil DB for unit test
 			if err != nil {
 				t.Errorf("NewPolicyService failed: %v", err)
 			}
@@ -35,11 +40,38 @@ func TestPolicyService(t *testing.T) {
 				t.Error("Signing key ID should not be empty")
 			}
 		})
+
+		t.Run("LoadsSigningKeyFromFile", func(t *testing.T) {
+			dir := t.TempDir()
+			_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatalf("generate key: %v", err)
+			}
+			encoded := base64.StdEncoding.EncodeToString(privateKey)
+			keyPath := filepath.Join(dir, "policy.key")
+			if err := os.WriteFile(keyPath, []byte(encoded), 0o600); err != nil {
+				t.Fatalf("write key: %v", err)
+			}
+
+			service, err := NewPolicyService(nil, config.PolicyConfig{SigningKeyPath: keyPath, SigningKeyID: "custom-id"})
+			if err != nil {
+				t.Fatalf("NewPolicyService returned error: %v", err)
+			}
+			if service.signingKeyID != "custom-id" {
+				t.Fatalf("expected signing key id to be custom-id, got %s", service.signingKeyID)
+			}
+			if !bytes.Equal(service.signingKey, privateKey) {
+				t.Fatalf("expected signing key to match configured material")
+			}
+			if !bytes.Equal(service.verifyingKey, privateKey.Public().(ed25519.PublicKey)) {
+				t.Fatalf("expected verifying key to match derived public key")
+			}
+		})
 	})
 
 	t.Run("PolicySigning", func(t *testing.T) {
 		t.Run("SignPolicy", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -78,7 +110,7 @@ func TestPolicyService(t *testing.T) {
 		})
 
 		t.Run("VerifyPolicySignature", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -112,7 +144,7 @@ func TestPolicyService(t *testing.T) {
 		})
 
 		t.Run("VerifyInvalidSignature", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -133,7 +165,7 @@ func TestPolicyService(t *testing.T) {
 		})
 
 		t.Run("VerifyMissingSignature", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -154,7 +186,7 @@ func TestPolicyService(t *testing.T) {
 		})
 
 		t.Run("VerifyWrongKeyID", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -177,7 +209,7 @@ func TestPolicyService(t *testing.T) {
 
 	t.Run("PolicySerialization", func(t *testing.T) {
 		t.Run("PolicyToJSON", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -223,7 +255,7 @@ func TestPolicyService(t *testing.T) {
 		})
 
 		t.Run("JSONToPolicy", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -270,7 +302,7 @@ func TestPolicyService(t *testing.T) {
 		})
 
 		t.Run("InvalidJSON", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -286,7 +318,7 @@ func TestPolicyService(t *testing.T) {
 
 	t.Run("DefaultPolicy", func(t *testing.T) {
 		t.Run("GetDefaultPolicy", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -325,7 +357,7 @@ func TestPolicyService(t *testing.T) {
 
 	t.Run("SignatureIntegrity", func(t *testing.T) {
 		t.Run("PolicyModificationDetection", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -364,7 +396,7 @@ func TestPolicyService(t *testing.T) {
 		})
 
 		t.Run("SignatureDeterministic", func(t *testing.T) {
-			service, err := NewPolicyService(nil)
+			service, err := NewPolicyService(nil, config.PolicyConfig{})
 			if err != nil {
 				t.Fatalf("Failed to create policy service: %v", err)
 			}
@@ -402,8 +434,8 @@ func TestPolicyService(t *testing.T) {
 // Helper function to check if a string contains a substring
 func containsString(haystack, needle string) bool {
 	return len(needle) > 0 && len(haystack) >= len(needle) &&
-		   haystack != needle &&
-		   findString(haystack, needle) >= 0
+		haystack != needle &&
+		findString(haystack, needle) >= 0
 }
 
 // Simple string search function

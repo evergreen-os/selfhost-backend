@@ -25,3 +25,8 @@ RETURNING *;
 -- name: DeleteTenant :exec
 DELETE FROM tenants
 WHERE id = $1;
+-- name: UpdateTenantSecret :one
+UPDATE tenants
+SET enrollment_secret_hash = $2, updated_at = NOW()
+WHERE id = $1
+RETURNING *;
